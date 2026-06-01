@@ -143,7 +143,8 @@ def get_notification_error_sent_count(report_schedule: ReportSchedule) -> int:
     notification_sent_logs = [
         log.error_message
         for log in logs
-        if log.error_message == "Notification sent with error"
+        if log.error_message
+        and log.error_message.startswith("Notification sent with error")
     ]
     return len(notification_sent_logs)
 

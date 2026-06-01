@@ -1309,6 +1309,35 @@ def test_not_triggered_error_state_send_failure_logs_error_and_reraises(
     assert "send failed" in error_msg
 
 
+def test_not_triggered_error_state_preserves_failure_reason_after_notification(
+    mocker: MockerFixture,
+) -> None:
+    """When send() fails and notification is sent, the final log should contain
+    both the notification marker and the original failure reason."""
+    state = _make_state_instance(
+        mocker,
+        ReportNotTriggeredErrorState,
+        schedule_type=ReportScheduleType.REPORT,
+    )
+    mocker.patch.object(state, "send", side_effect=RuntimeError("screenshot timeout"))
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "send_error")
+    mocker.patch.object(state, "is_in_error_grace_period", return_value=False)
+
+    with pytest.raises(RuntimeError, match="screenshot timeout"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    # Third call is the final log after notification attempt
+    final_call = calls[-1]
+    assert final_call.args[0] == ReportState.ERROR
+    logged_msg = final_call.kwargs.get("error_message") or (
+        final_call.args[1] if len(final_call.args) > 1 else ""
+    )
+    assert logged_msg.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "screenshot timeout" in logged_msg
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 remaining gaps
 # ---------------------------------------------------------------------------
@@ -1357,13 +1386,12 @@ def test_success_state_alert_command_error_sends_error_and_reraises(
 
     state.send_error.assert_called_once()  # type: ignore[attr-defined]
     calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
-    # First call: WORKING, second call: ERROR with marker
+    # First call: WORKING, second call: ERROR with marker + original error
     assert calls[0].args[0] == ReportState.WORKING
     assert calls[1].args[0] == ReportState.ERROR
-    assert (
-        calls[1].kwargs.get("error_message")
-        == REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER
-    )
+    logged_msg = calls[1].kwargs.get("error_message", "")
+    assert logged_msg.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "alert boom" in logged_msg
 
 
 def test_success_state_send_error_logs_and_reraises(

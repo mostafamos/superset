@@ -271,8 +271,9 @@ class ReportScheduleDAO(BaseDAO[ReportSchedule]):
         last_error_email_log = (
             db.session.query(ReportExecutionLog)
             .filter(
-                ReportExecutionLog.error_message
-                == REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER,
+                ReportExecutionLog.error_message.startswith(
+                    REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER
+                ),
                 ReportExecutionLog.report_schedule == report_schedule,
             )
             .order_by(ReportExecutionLog.end_dttm.desc())
