@@ -947,7 +947,8 @@ class ReportNotTriggeredErrorState(BaseReportState):
                 finally:
                     try:
                         self.update_report_schedule_and_log(
-                            ReportState.ERROR, error_message=second_error_message
+                            ReportState.ERROR,
+                            error_message=(f"{second_error_message}\n{error_message}"),
                         )
                     except ReportScheduleUnexpectedError:
                         # Logging failed again, log it but don't let it hide first_ex
@@ -1038,7 +1039,9 @@ class ReportSuccessState(BaseReportState):
                 )
                 self.update_report_schedule_and_log(
                     ReportState.ERROR,
-                    error_message=REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER,
+                    error_message=(
+                        f"{REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER}\n{str(ex)}"
+                    ),
                 )
                 raise
 
