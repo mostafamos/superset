@@ -1341,7 +1341,7 @@ def test_get_dashboard_urls_no_state_fallback(
 def test_success_state_alert_command_error_sends_error_and_reraises(
     mocker: MockerFixture,
 ) -> None:
-    """AlertCommand exception -> send_error + ERROR state with marker."""
+    """AlertCommand exception -> send_error + ERROR state preserving original reason."""
     state = _make_state_instance(
         mocker, ReportSuccessState, schedule_type=ReportScheduleType.ALERT
     )
@@ -1357,13 +1357,12 @@ def test_success_state_alert_command_error_sends_error_and_reraises(
 
     state.send_error.assert_called_once()  # type: ignore[attr-defined]
     calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
-    # First call: WORKING, second call: ERROR with marker
+    # First call: WORKING, second call: ERROR with original reason + marker
     assert calls[0].args[0] == ReportState.WORKING
     assert calls[1].args[0] == ReportState.ERROR
-    assert (
-        calls[1].kwargs.get("error_message")
-        == REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER
-    )
+    error_msg = calls[1].kwargs.get("error_message", "")
+    assert "alert boom" in error_msg
+    assert REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER in error_msg
 
 
 def test_success_state_send_error_logs_and_reraises(
@@ -1521,3 +1520,86 @@ def test_get_url_for_csv_uses_post_processed_type(
         f"CSV report URL must use type=post_processed so chart filters "
         f"(incl. time filters) are applied; got: {url}; see issue #25538"
     )
+
+
+# ---------------------------------------------------------------------------
+# Preserve actionable failure reason in error logs
+# ---------------------------------------------------------------------------
+
+
+def test_noop_error_state_preserves_original_error_in_final_log(
+    mocker: MockerFixture,
+) -> None:
+    """Final log after error notification should contain the original failure reason."""
+    state = _make_state_instance(
+        mocker,
+        ReportNotTriggeredErrorState,
+        schedule_type=ReportScheduleType.REPORT,
+    )
+    mocker.patch.object(state, "send", side_effect=RuntimeError("screenshot timeout"))
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "is_in_error_grace_period", return_value=False)
+    mocker.patch.object(state, "send_error")
+
+    with pytest.raises(RuntimeError, match="screenshot timeout"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    # Third call is the final log in the finally block
+    final_call = calls[-1]
+    assert final_call.args[0] == ReportState.ERROR
+    final_msg = final_call.kwargs.get("error_message", "")
+    assert "screenshot timeout" in final_msg
+    assert REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER in final_msg
+
+
+def test_noop_error_state_preserves_error_when_notification_fails(
+    mocker: MockerFixture,
+) -> None:
+    """When send_error also fails, final log should still contain original reason."""
+    state = _make_state_instance(
+        mocker,
+        ReportNotTriggeredErrorState,
+        schedule_type=ReportScheduleType.REPORT,
+    )
+    mocker.patch.object(
+        state, "send", side_effect=RuntimeError("csv generation failed")
+    )
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "is_in_error_grace_period", return_value=False)
+    mocker.patch.object(
+        state, "send_error", side_effect=RuntimeError("email server down")
+    )
+
+    with pytest.raises(RuntimeError, match="csv generation failed"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    final_call = calls[-1]
+    final_msg = final_call.kwargs.get("error_message", "")
+    assert "csv generation failed" in final_msg
+    assert "email server down" in final_msg
+
+
+def test_success_state_alert_error_preserves_original_reason(
+    mocker: MockerFixture,
+) -> None:
+    """AlertCommand error in SUCCESS state should preserve reason in log."""
+    state = _make_state_instance(
+        mocker, ReportSuccessState, schedule_type=ReportScheduleType.ALERT
+    )
+    mocker.patch.object(state, "is_in_grace_period", return_value=False)
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "send_error")
+    mocker.patch(
+        "superset.commands.report.execute.AlertCommand"
+    ).return_value.run.side_effect = RuntimeError("query timeout")
+
+    with pytest.raises(RuntimeError, match="query timeout"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    error_call = calls[-1]
+    assert error_call.args[0] == ReportState.ERROR
+    error_msg = error_call.kwargs.get("error_message", "")
+    assert "query timeout" in error_msg
