@@ -1309,6 +1309,31 @@ def test_not_triggered_error_state_send_failure_logs_error_and_reraises(
     assert "send failed" in error_msg
 
 
+def test_not_triggered_error_state_preserves_failure_reason_after_notification(
+    mocker: MockerFixture,
+) -> None:
+    """Original failure reason must survive in the final log entry after error
+    notification is sent (not in grace period)."""
+    state = _make_state_instance(
+        mocker,
+        ReportNotTriggeredErrorState,
+        schedule_type=ReportScheduleType.REPORT,
+    )
+    mocker.patch.object(state, "send", side_effect=RuntimeError("Screenshot timeout"))
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "is_in_error_grace_period", return_value=False)
+    mocker.patch.object(state, "send_error")
+
+    with pytest.raises(RuntimeError, match="Screenshot timeout"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    # calls: WORKING, ERROR (original), ERROR (after notification)
+    final_error_msg = calls[-1].kwargs.get("error_message") or ""
+    assert "Screenshot timeout" in final_error_msg
+    assert REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER in final_error_msg
+
+
 # ---------------------------------------------------------------------------
 # Phase 1 remaining gaps
 # ---------------------------------------------------------------------------
@@ -1360,10 +1385,9 @@ def test_success_state_alert_command_error_sends_error_and_reraises(
     # First call: WORKING, second call: ERROR with marker
     assert calls[0].args[0] == ReportState.WORKING
     assert calls[1].args[0] == ReportState.ERROR
-    assert (
-        calls[1].kwargs.get("error_message")
-        == REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER
-    )
+    error_msg = calls[1].kwargs.get("error_message") or ""
+    assert "alert boom" in error_msg
+    assert REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER in error_msg
 
 
 def test_success_state_send_error_logs_and_reraises(
