@@ -1341,7 +1341,7 @@ def test_get_dashboard_urls_no_state_fallback(
 def test_success_state_alert_command_error_sends_error_and_reraises(
     mocker: MockerFixture,
 ) -> None:
-    """AlertCommand exception -> send_error + ERROR state with marker."""
+    """AlertCommand exception -> send_error + ERROR with marker + original."""
     state = _make_state_instance(
         mocker, ReportSuccessState, schedule_type=ReportScheduleType.ALERT
     )
@@ -1357,13 +1357,13 @@ def test_success_state_alert_command_error_sends_error_and_reraises(
 
     state.send_error.assert_called_once()  # type: ignore[attr-defined]
     calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
-    # First call: WORKING, second call: ERROR with marker
+    # First call: WORKING, second call: ERROR with marker prefixed to real error
     assert calls[0].args[0] == ReportState.WORKING
     assert calls[1].args[0] == ReportState.ERROR
-    assert (
-        calls[1].kwargs.get("error_message")
-        == REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER
-    )
+    error_msg = calls[1].kwargs.get("error_message")
+    assert error_msg is not None
+    assert error_msg.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "alert boom" in error_msg
 
 
 def test_success_state_send_error_logs_and_reraises(
@@ -1521,3 +1521,88 @@ def test_get_url_for_csv_uses_post_processed_type(
         f"CSV report URL must use type=post_processed so chart filters "
         f"(incl. time filters) are applied; got: {url}; see issue #25538"
     )
+
+
+# ---------------------------------------------------------------------------
+# Preserve actionable failure reason in error_message
+# ---------------------------------------------------------------------------
+
+
+def test_not_triggered_error_state_preserves_error_in_marker(
+    mocker: MockerFixture,
+) -> None:
+    """After send() fails and notification is sent, the final log entry should
+    contain BOTH the marker prefix AND the original exception text."""
+    state = _make_state_instance(
+        mocker,
+        ReportNotTriggeredErrorState,
+        schedule_type=ReportScheduleType.REPORT,
+    )
+    mocker.patch.object(state, "send", side_effect=RuntimeError("Connection refused"))
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "send_error")
+    mocker.patch.object(state, "is_in_error_grace_period", return_value=False)
+
+    with pytest.raises(RuntimeError, match="Connection refused"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    # Final log entry (third call): WORKING -> ERROR(original) -> ERROR(marker+original)
+    final_call = calls[-1]
+    assert final_call.args[0] == ReportState.ERROR
+    error_msg = final_call.kwargs.get("error_message", "")
+    assert error_msg.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "Connection refused" in error_msg
+
+
+def test_not_triggered_error_state_notification_failure_preserves_secondary_error(
+    mocker: MockerFixture,
+) -> None:
+    """When send_error() itself fails, the secondary error should be prefixed
+    with the marker, not replace it entirely."""
+    state = _make_state_instance(
+        mocker,
+        ReportNotTriggeredErrorState,
+        schedule_type=ReportScheduleType.REPORT,
+    )
+    mocker.patch.object(state, "send", side_effect=RuntimeError("original boom"))
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(
+        state, "send_error", side_effect=RuntimeError("notification failed")
+    )
+    mocker.patch.object(state, "is_in_error_grace_period", return_value=False)
+
+    with pytest.raises(RuntimeError, match="original boom"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    final_call = calls[-1]
+    error_msg = final_call.kwargs.get("error_message", "")
+    assert error_msg.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "notification failed" in error_msg
+
+
+def test_success_state_alert_error_preserves_original_in_marker(
+    mocker: MockerFixture,
+) -> None:
+    """ReportSuccessState alert-check failure should store the original error
+    alongside the marker, not just the marker."""
+    state = _make_state_instance(
+        mocker, ReportSuccessState, schedule_type=ReportScheduleType.ALERT
+    )
+    mocker.patch.object(state, "is_in_grace_period", return_value=False)
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "send_error")
+    mocker.patch(
+        "superset.commands.report.execute.AlertCommand"
+    ).return_value.run.side_effect = RuntimeError("DB connection lost")
+
+    with pytest.raises(RuntimeError, match="DB connection lost"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    error_call = calls[-1]
+    assert error_call.args[0] == ReportState.ERROR
+    error_msg = error_call.kwargs.get("error_message", "")
+    assert error_msg.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "DB connection lost" in error_msg
