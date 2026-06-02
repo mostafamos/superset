@@ -923,7 +923,9 @@ class ReportNotTriggeredErrorState(BaseReportState):
 
             # TODO (dpgaspar) convert this logic to a new state eg: ERROR_ON_GRACE
             if not self.is_in_error_grace_period():
-                second_error_message = REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER
+                second_error_message = (
+                    f"{REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER}: {error_message}"
+                )
                 try:
                     self.send_error(
                         f"Error occurred for {self._report_schedule.type}:"
@@ -932,8 +934,9 @@ class ReportNotTriggeredErrorState(BaseReportState):
                     )
 
                 except SupersetErrorsException as second_ex:
-                    second_error_message = ";".join(
-                        [error.message for error in second_ex.errors]
+                    second_error_message = (
+                        f"{REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER}: "
+                        + ";".join([error.message for error in second_ex.errors])
                     )
                 except ReportScheduleUnexpectedError:
                     # send_error failed due to logging issue, log and continue
@@ -943,7 +946,9 @@ class ReportNotTriggeredErrorState(BaseReportState):
                         exc_info=True,
                     )
                 except Exception as second_ex:  # pylint: disable=broad-except
-                    second_error_message = str(second_ex)
+                    second_error_message = (
+                        f"{REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER}: {second_ex}"
+                    )
                 finally:
                     try:
                         self.update_report_schedule_and_log(
@@ -1038,7 +1043,9 @@ class ReportSuccessState(BaseReportState):
                 )
                 self.update_report_schedule_and_log(
                     ReportState.ERROR,
-                    error_message=REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER,
+                    error_message=(
+                        f"{REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER}: {ex}"
+                    ),
                 )
                 raise
 
