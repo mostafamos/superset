@@ -1357,13 +1357,13 @@ def test_success_state_alert_command_error_sends_error_and_reraises(
 
     state.send_error.assert_called_once()  # type: ignore[attr-defined]
     calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
-    # First call: WORKING, second call: ERROR with marker
+    # First call: WORKING, second call: ERROR with original error,
+    # third call: ERROR with marker + original error
     assert calls[0].args[0] == ReportState.WORKING
     assert calls[1].args[0] == ReportState.ERROR
-    assert (
-        calls[1].kwargs.get("error_message")
-        == REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER
-    )
+    logged_error = calls[1].kwargs.get("error_message") or ""
+    assert logged_error.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "alert boom" in logged_error
 
 
 def test_success_state_send_error_logs_and_reraises(
@@ -1521,3 +1521,57 @@ def test_get_url_for_csv_uses_post_processed_type(
         f"CSV report URL must use type=post_processed so chart filters "
         f"(incl. time filters) are applied; got: {url}; see issue #25538"
     )
+
+
+# ---------------------------------------------------------------------------
+# Preserve actionable error in error_message alongside notification marker
+# ---------------------------------------------------------------------------
+
+
+def test_initial_state_error_preserves_original_error_in_marker(
+    mocker: MockerFixture,
+) -> None:
+    """ReportNotTriggeredErrorState: error_message contains both marker and original."""
+    from superset.commands.report.execute import ReportNotTriggeredErrorState
+
+    state = _make_state_instance(
+        mocker,
+        ReportNotTriggeredErrorState,
+        schedule_type=ReportScheduleType.REPORT,
+    )
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "send", side_effect=RuntimeError("screenshot timeout"))
+    mocker.patch.object(state, "send_error")
+    mocker.patch.object(state, "is_in_error_grace_period", return_value=False)
+
+    with pytest.raises(RuntimeError, match="screenshot timeout"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    # Last call is the notification-marker log entry
+    final_error = calls[-1].kwargs.get("error_message") or ""
+    assert final_error.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "screenshot timeout" in final_error
+
+
+def test_success_state_alert_error_preserves_original_error_in_marker(
+    mocker: MockerFixture,
+) -> None:
+    """ReportSuccessState alert path: marker + original error."""
+    state = _make_state_instance(
+        mocker, ReportSuccessState, schedule_type=ReportScheduleType.ALERT
+    )
+    mocker.patch.object(state, "is_in_grace_period", return_value=False)
+    mocker.patch.object(state, "update_report_schedule_and_log")
+    mocker.patch.object(state, "send_error")
+    mocker.patch(
+        "superset.commands.report.execute.AlertCommand"
+    ).return_value.run.side_effect = RuntimeError("database connection refused")
+
+    with pytest.raises(RuntimeError, match="database connection refused"):
+        state.next()
+
+    calls = state.update_report_schedule_and_log.call_args_list  # type: ignore[attr-defined]
+    final_error = calls[-1].kwargs.get("error_message") or ""
+    assert final_error.startswith(REPORT_SCHEDULE_ERROR_NOTIFICATION_MARKER)
+    assert "database connection refused" in final_error
