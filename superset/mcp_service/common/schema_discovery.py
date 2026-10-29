@@ -160,6 +160,11 @@ _COLUMN_DESCRIPTIONS: dict[str, str] = {
     "filter_select_enabled": "Whether filter select is enabled",
     "normalize_columns": "Whether to normalize column names",
     "always_filter_main_dttm": "Whether to always filter on the main datetime column",
+    "partition_column": "Physical column the engine partitions on",
+    "partition_mapped_column": (
+        "Column whose filters are mirrored onto the partition column; "
+        "defaults to the main datetime column"
+    ),
     "fetch_values_predicate": "SQL predicate for fetching filter values",
     "default_endpoint": "Default endpoint URL",
     "offset": "Row offset for queries",
@@ -257,13 +262,14 @@ CHART_SORTABLE_COLUMNS = [
     "viz_type",
     "description",
     "changed_on",
+    "changed_on_delta_humanized",
     "created_on",
 ]
 CHART_SEARCH_COLUMNS = ["slice_name", "description"]
 CHART_EXTRA_COLUMNS: dict[str, ColumnMetadata] = {
     "datasource_name": ColumnMetadata(
         name="datasource_name",
-        description="Data source name",
+        description="Current name of the chart's dataset or semantic view",
         type="str",
         is_default=False,
     ),
@@ -333,8 +339,8 @@ CHART_EXTRA_COLUMNS: dict[str, ColumnMetadata] = {
     "tags": ColumnMetadata(
         name="tags", description="Chart tags", type="list", is_default=False
     ),
-    "owners": ColumnMetadata(
-        name="owners", description="Chart owners", type="list", is_default=False
+    "editors": ColumnMetadata(
+        name="editors", description="Chart editors", type="list", is_default=False
     ),
 }
 
@@ -354,9 +360,15 @@ DATASET_SORTABLE_COLUMNS = [
     "table_name",
     "schema",
     "changed_on",
+    "changed_on_delta_humanized",
     "created_on",
 ]
-DATASET_SEARCH_COLUMNS = ["table_name", "description"]
+# Single source of truth for what ``list_datasets`` searches, so ``get_schema``
+# and the schema resource cannot drift from the tool's actual behavior. ``uuid``
+# is deliberately absent from the generic substring search because its storage
+# representation varies by database. ``list_datasets`` recognizes a complete
+# UUID search separately and converts it to an exact ``uuid`` filter.
+DATASET_SEARCH_COLUMNS = ["table_name", "description", "schema", "sql"]
 DATASET_EXTRA_COLUMNS: dict[str, ColumnMetadata] = {
     "database_name": ColumnMetadata(
         name="database_name",
@@ -427,8 +439,8 @@ DATASET_EXTRA_COLUMNS: dict[str, ColumnMetadata] = {
     "tags": ColumnMetadata(
         name="tags", description="Dataset tags", type="list", is_default=False
     ),
-    "owners": ColumnMetadata(
-        name="owners", description="Dataset owners", type="list", is_default=False
+    "editors": ColumnMetadata(
+        name="editors", description="Dataset editors", type="list", is_default=False
     ),
 }
 
@@ -450,6 +462,7 @@ DASHBOARD_SORTABLE_COLUMNS = [
     "slug",
     "published",
     "changed_on",
+    "changed_on_delta_humanized",
     "created_on",
 ]
 DASHBOARD_SEARCH_COLUMNS = ["dashboard_title", "slug"]
@@ -496,11 +509,17 @@ DASHBOARD_EXTRA_COLUMNS: dict[str, ColumnMetadata] = {
     "tags": ColumnMetadata(
         name="tags", description="Dashboard tags", type="list", is_default=False
     ),
-    "owners": ColumnMetadata(
-        name="owners", description="Dashboard owners", type="list", is_default=False
+    "editors": ColumnMetadata(
+        name="editors", description="Dashboard editors", type="list", is_default=False
     ),
     "charts": ColumnMetadata(
         name="charts", description="Charts in dashboard", type="list", is_default=False
+    ),
+    "native_filters": ColumnMetadata(
+        name="native_filters",
+        description="Native filter configuration (name, type, targets)",
+        type="list",
+        is_default=False,
     ),
 }
 
@@ -637,80 +656,96 @@ DASHBOARD_ALL_COLUMNS: list[str] = []
 DATABASE_ALL_COLUMNS: list[str] = []
 
 
-# CSS Template configuration
-CSS_TEMPLATE_DEFAULT_COLUMNS = [
+# Report (alerts & reports) configuration
+REPORT_DEFAULT_COLUMNS = ["id", "name", "type", "active", "crontab"]
+REPORT_SORTABLE_COLUMNS = [
     "id",
-    "uuid",
-    "template_name",
-]
-CSS_TEMPLATE_SORTABLE_COLUMNS = [
-    "id",
-    "template_name",
+    "name",
+    "type",
+    "active",
+    "last_eval_dttm",
     "changed_on",
     "created_on",
 ]
-CSS_TEMPLATE_SEARCH_COLUMNS = ["template_name"]
-CSS_TEMPLATE_FILTER_COLUMNS: dict[str, list[str]] = {
-    "template_name": ["eq", "sw", "ilike"],
-    "created_by_fk": ["eq"],
-}
-CSS_TEMPLATE_EXTRA_COLUMNS: dict[str, ColumnMetadata] = {
-    "created_by_name": ColumnMetadata(
-        name="created_by_name",
-        description="Username of the creator",
-        type="str",
-        is_default=False,
-    ),
-    "changed_by_name": ColumnMetadata(
-        name="changed_by_name",
-        description="Username of the last modifier",
-        type="str",
-        is_default=False,
-    ),
-}
+REPORT_SEARCH_COLUMNS = ["name", "description"]
+# Allowlist of filter columns exposed via get_schema and accepted by ReportFilter.
+# Must stay in sync with the Literal in ReportFilter.col (schemas.py).
+REPORT_FILTER_COLUMNS: frozenset[str] = frozenset(
+    {
+        "name",
+        "type",
+        "active",
+        "dashboard_id",
+        "chart_id",
+        "last_state",
+        "creation_method",
+    }
+)
 
 
-def get_css_template_columns() -> list[ColumnMetadata]:
-    """Get column metadata for CssTemplate model dynamically."""
-    from superset.models.core import CssTemplate
+def _annotation_to_type_str(annotation: Any) -> str:
+    """Extract a simple type string from a Python type annotation."""
+    import types as _builtin_types
+    import typing
 
-    return get_columns_from_model(
-        CssTemplate,
-        CSS_TEMPLATE_DEFAULT_COLUMNS,
-        CSS_TEMPLATE_EXTRA_COLUMNS,
-        exclude_columns=set(USER_DIRECTORY_FIELDS)
-        - {"created_by_name", "changed_by_name"},
-    )
+    if annotation is None:
+        return "str"
+
+    # Python 3.10+ union syntax: X | Y | None → extract first non-None
+    if isinstance(annotation, _builtin_types.UnionType):
+        non_none = [a for a in annotation.__args__ if a is not type(None)]
+        return _annotation_to_type_str(non_none[0]) if non_none else "str"
+
+    # typing.Union (e.g. Optional[X] or Union[X, Y, None])
+    if getattr(annotation, "__origin__", None) is typing.Union:
+        non_none = [a for a in annotation.__args__ if a is not type(None)]
+        return _annotation_to_type_str(non_none[0]) if non_none else "str"
+
+    # Generic list/dict
+    origin = getattr(annotation, "__origin__", None)
+    if origin is list:
+        return "list"
+    if origin is dict:
+        return "dict"
+
+    _simple: dict[type, str] = {
+        int: "int",
+        str: "str",
+        bool: "bool",
+        float: "float",
+    }
+    if annotation in _simple:
+        return _simple[annotation]
+
+    from datetime import datetime
+
+    if annotation is datetime:
+        return "datetime"
+
+    return "str"
 
 
-# Theme configuration
-THEME_DEFAULT_COLUMNS = [
-    "id",
-    "theme_name",
-    "uuid",
-]
-THEME_SORTABLE_COLUMNS = [
-    "id",
-    "theme_name",
-    "changed_on",
-    "created_on",
-]
-THEME_SEARCH_COLUMNS = ["theme_name"]
-THEME_FILTER_COLUMNS: dict[str, list[str]] = {
-    "theme_name": ["eq", "sw", "ilike"],
-    "is_system": ["eq"],
-    "is_system_default": ["eq"],
-    "is_system_dark": ["eq"],
-    "created_by_fk": ["eq"],
-}
+def get_report_info_columns() -> list[ColumnMetadata]:
+    """Get column metadata derived from the ReportInfo serializer fields.
 
+    Uses ReportInfo.model_fields as the authoritative source so that
+    get_schema(model_type='report') advertises only columns that
+    list_reports can actually serialize.
+    """
+    from superset.mcp_service.privacy import USER_DIRECTORY_FIELDS
+    from superset.mcp_service.report.schemas import ReportInfo
 
-def get_theme_columns() -> list[ColumnMetadata]:
-    """Get column metadata for Theme model dynamically."""
-    from superset.models.core import Theme
-
-    return get_columns_from_model(
-        Theme,
-        THEME_DEFAULT_COLUMNS,
-        exclude_columns=set(USER_DIRECTORY_FIELDS),
-    )
+    columns = []
+    for name, field_info in ReportInfo.model_fields.items():
+        if name in USER_DIRECTORY_FIELDS:
+            continue
+        col_type = _annotation_to_type_str(field_info.annotation)
+        columns.append(
+            ColumnMetadata(
+                name=name,
+                description=field_info.description,
+                type=col_type,
+                is_default=name in REPORT_DEFAULT_COLUMNS,
+            )
+        )
+    return columns
